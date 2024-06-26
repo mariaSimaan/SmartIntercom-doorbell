@@ -1,12 +1,16 @@
-#include <Adafruit_Keypad.h>
+#include <Adafruit_Keypad.h> // Correct inclusion of the library
 
-#define R1    14
-#define R2    27
-#define R3    26
+// define your specific keypad here via PID
+#define KEYPAD_PID3845
+
+// define your pins here
 #define R4    25
+#define R3    27
+#define R2    14
+#define R1    32
 #define C1    33
-#define C2    32
-#define C3    35
+#define C2    12
+#define C3    26
 
 // Keymap for 3x4 Keypad
 char keys[4][3] = {
