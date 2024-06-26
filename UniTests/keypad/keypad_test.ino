@@ -1,46 +1,44 @@
-// Use this example with the Adafruit Keypad products.
-// You'll need to know the Product ID for your keypad.
-// Here's a summary:
-//   * PID3844 4x4 Matrix Keypad
-//   * PID3845 3x4 Matrix Keypad
-//   * PID1824 3x4 Phone-style Matrix Keypad
-//   * PID1332 Membrane 1x4 Keypad
-//   * PID419  Membrane 3x4 Matrix Keypad
+#include <Adafruit_Keypad.h>
 
-#include "Adafruit_Keypad.h"
+#define R1    14
+#define R2    27
+#define R3    26
+#define R4    25
+#define C1    33
+#define C2    32
+#define C3    35
 
-// define your specific keypad here via PID
-#define KEYPAD_PID3845
-// define your pins here
-// can ignore ones that don't apply
-#define R1    2
-#define R2    3
-#define R3    4
-#define R4    5
-#define C1    8
-#define C2    9
-#define C3    10
-#define C4    11
-// leave this import after the above configuration
-#include "keypad_config.h"
+// Keymap for 3x4 Keypad
+char keys[4][3] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
 
-//initialize an instance of class NewKeypad
-Adafruit_Keypad customKeypad = Adafruit_Keypad( makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+// Row and column pins for 3x4 Keypad
+byte rowPins[4] = { R1, R2, R3, R4 };
+byte colPins[3] = { C1, C2, C3 };
+
+// Initialize an instance of class Adafruit_Keypad
+Adafruit_Keypad customKeypad = Adafruit_Keypad(makeKeymap(keys), rowPins, colPins, 4, 3);
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);  // Adjusted for ESP32
   customKeypad.begin();
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
   customKeypad.tick();
-
-  while(customKeypad.available()){
+  while(customKeypad.available()) {
     keypadEvent e = customKeypad.read();
-    Serial.print((char)e.bit.KEY);
-    if(e.bit.EVENT == KEY_JUST_PRESSED) Serial.println(" pressed");
-    else if(e.bit.EVENT == KEY_JUST_RELEASED) Serial.println(" released");
+    char key = (char)e.bit.KEY;
+    Serial.print(key);
+    if (e.bit.EVENT == KEY_JUST_PRESSED) {
+      Serial.println(" pressed");
+    } else if (e.bit.EVENT == KEY_JUST_RELEASED) {
+      Serial.println(" released");
+    }
   }
 
   delay(10);
