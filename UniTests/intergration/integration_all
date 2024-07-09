@@ -1,0 +1,460 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_Keypad.h>
+#include <Arduino.h>
+#include <driver/i2s.h>
+#include <math.h>
+#include <WiFiManager.h>
+#include <SPIFFS.h>
+#include <WebServer.h>
+
+// OLED display width and height, in pixels
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// define your specific keypad here via PID
+#define KEYPAD_PID3845
+
+// define your pins here
+#define R4   19 
+#define R3   13 
+#define R2   12 
+#define R1   4    
+#define C1   21 
+#define C2   27 
+#define C3   33  
+
+// Keymap for 3x4 Keypad
+char keys[4][3] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
+
+// Row and column pins for 3x4 Keypad
+byte rowPins[4] = { R1, R2, R3, R4 };
+byte colPins[3] = { C1, C2, C3 };
+
+// Initialize an instance of class Adafruit_Keypad
+Adafruit_Keypad customKeypad = Adafruit_Keypad(makeKeymap(keys), rowPins, colPins, 4, 3);
+
+// I2S configuration constants
+#define I2S_NUM         (0) // I2S port number
+#define I2S_SAMPLE_RATE (44100)
+#define I2S_BITS        (16)
+#define I2S_CHANNELS    (2)
+
+bool dacInUse = false;
+bool isRecording = false;
+SemaphoreHandle_t i2sMutex;
+
+// Connections to INMP441 I2S microphone
+#define I2S_WS 14
+#define I2S_SD 15
+#define I2S_SCK 32
+#define I2S_PORT I2S_NUM_0
+#define I2S_SAMPLE_RATE_MIC   (16000)
+#define I2S_SAMPLE_BITS_MIC   (16)
+#define I2S_READ_LEN      (16 * 1024)
+#define RECORD_TIME       (20) // Seconds
+#define I2S_CHANNEL_NUM   (1)
+#define FLASH_RECORD_SIZE (I2S_CHANNEL_NUM * I2S_SAMPLE_RATE_MIC * I2S_SAMPLE_BITS_MIC / 8 * RECORD_TIME)
+
+File file;
+const char filename[] = "/recording.wav";
+const int headerSize = 44;
+
+WiFiManager wifiManager;
+WebServer server(80);
+
+// Function to generate a sine wave audio signal
+void generateSineWave(int16_t* buffer, int bufferSize) {
+    const float frequency = 440.0;  // Frequency of the sine wave (440 Hz for A4)
+    const float amplitude = 2000;  // Amplitude of the sine wave - change it to change the volume 
+
+    for (int i = 0; i < bufferSize; i += 2) {
+        float sample = amplitude * sin(2 * M_PI * frequency * (i / 2) / I2S_SAMPLE_RATE);
+        buffer[i] = buffer[i + 1] = (int16_t) sample;
+    }
+}
+
+void setupAudio() {
+    // Initialize I2S configuration
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX), // Master transmitter
+        .sample_rate = I2S_SAMPLE_RATE,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1, // Interrupt level 1
+        .dma_buf_count = 8,
+        .dma_buf_len = 64,
+        .use_apll = false  // Set to true if using APLL (ESP32-S2 specific)
+    };
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = 26,   // BCK pin
+        .ws_io_num = 25,    // LRCK pin
+        .data_out_num = 22, // DATA pin
+        .data_in_num = I2S_PIN_NO_CHANGE // Not used
+    };
+
+    // Uninstall I2S driver if already installed
+    i2s_driver_uninstall((i2s_port_t)I2S_NUM);
+
+    // Install and start I2S driver
+    i2s_driver_install((i2s_port_t)I2S_NUM, &i2s_config, 0, NULL);
+    i2s_set_pin((i2s_port_t)I2S_NUM, &pin_config);
+}
+
+void playNote() {
+    // Prepare a buffer to store audio data
+    const int bufferSize = 1024;
+    int16_t buffer[bufferSize];
+
+    // Generate a sine wave
+    generateSineWave(buffer, bufferSize);
+
+    // Write the buffer to I2S
+    size_t bytes_written = 0;
+    i2s_write((i2s_port_t)I2S_NUM, buffer, bufferSize * sizeof(int16_t), &bytes_written, portMAX_DELAY);
+}
+
+void stopNote() {
+    // Stop I2S driver
+    i2s_driver_uninstall((i2s_port_t)I2S_NUM);
+}
+
+void SPIFFSInit() {
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS initialization failed!");
+    while (1) yield();
+  }
+  SPIFFS.remove(filename);
+}
+
+void i2sInit() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = I2S_SAMPLE_RATE_MIC,
+    .bits_per_sample = i2s_bits_per_sample_t(I2S_SAMPLE_BITS_MIC),
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
+    .intr_alloc_flags = 0,
+    .dma_buf_count = 64,
+    .dma_buf_len = 1024,
+    .use_apll = 1
+  };
+
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+
+  const i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_SCK,
+    .ws_io_num = I2S_WS,
+    .data_out_num = -1,
+    .data_in_num = I2S_SD
+  };
+
+  i2s_set_pin(I2S_PORT, &pin_config);
+}
+
+void i2s_adc_data_scale(uint8_t * d_buff, uint8_t* s_buff, uint32_t len) {
+  uint32_t j = 0;
+  uint32_t dac_value = 0;
+  for (int i = 0; i < len; i += 2) {
+    dac_value = ((((uint16_t) (s_buff[i + 1] & 0xf) << 8) | ((s_buff[i + 0]))));
+    d_buff[j++] = 0;
+    d_buff[j++] = dac_value * 256 / 2048;
+  }
+}
+
+void i2s_adc(void *arg) {
+  int i2s_read_len = I2S_READ_LEN;
+  int flash_wr_size = 0;
+  size_t bytes_read;
+
+  char* i2s_read_buff = (char*) calloc(i2s_read_len, sizeof(char));
+  if (i2s_read_buff == NULL) {
+    Serial.println("Failed to allocate memory for i2s_read_buff");
+    vTaskDelete(NULL);
+    return;
+  }
+
+  uint8_t* flash_write_buff = (uint8_t*) calloc(i2s_read_len, sizeof(char));
+  if (flash_write_buff == NULL) {
+    Serial.println("Failed to allocate memory for flash_write_buff");
+    free(i2s_read_buff);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  if (i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY) != ESP_OK) {
+    Serial.println("Initial I2S read failed");
+    free(i2s_read_buff);
+    free(flash_write_buff);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  Serial.println(" *** Recording Start *** ");
+  while (flash_wr_size < FLASH_RECORD_SIZE) {
+    // Read data from I2S bus, in this case, from ADC.
+    if (i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY) != ESP_OK) {
+      Serial.println("Failed to read from I2S");
+      break;
+    }
+    // Save original data from I2S (ADC) into flash.
+    i2s_adc_data_scale(flash_write_buff, (uint8_t*)i2s_read_buff, i2s_read_len);
+    if (file.write((const byte*) flash_write_buff, i2s_read_len) != i2s_read_len) {
+      Serial.println("Failed to write data to file");
+      break;
+    }
+    flash_wr_size += i2s_read_len;
+    Serial.printf("Sound recording %u%%\n", flash_wr_size * 100 / FLASH_RECORD_SIZE);
+    Serial.printf("Never Used Stack Size: %u\n", uxTaskGetStackHighWaterMark(NULL));
+  }
+  file.close();
+
+  free(i2s_read_buff);
+  free(flash_write_buff);
+
+  Serial.println(" *** Recording Finished *** ");
+  listSPIFFS();
+  vTaskDelete(NULL);
+}
+
+void startRecording() {
+  file = SPIFFS.open(filename, FILE_WRITE);
+  if (!file) {
+    Serial.println("File is not available!");
+    return;
+  }
+
+  byte header[headerSize];
+  wavHeader(header, FLASH_RECORD_SIZE);
+  if (file.write(header, headerSize) != headerSize) {
+    Serial.println("Failed to write WAV header");
+    file.close();
+    return;
+  }
+
+  if (xTaskCreatePinnedToCore(i2s_adc, "i2s_adc", 4096, NULL, 1, NULL, 1) != pdPASS) {
+    Serial.println("Failed to create i2s_adc task");
+    file.close();
+  }
+}
+
+void wavHeader(byte* header, int wavSize) {
+  header[0] = 'R';
+  header[1] = 'I';
+  header[2] = 'F';
+  header[3] = 'F';
+  unsigned int fileSize = wavSize + headerSize - 8;
+  header[4] = (byte)(fileSize & 0xFF);
+  header[5] = (byte)((fileSize >> 8) & 0xFF);
+  header[6] = (byte)((fileSize >> 16) & 0xFF);
+  header[7] = (byte)((fileSize >> 24) & 0xFF);
+  header[8] = 'W';
+  header[9] = 'A';
+  header[10] = 'V';
+  header[11] = 'E';
+  header[12] = 'f';
+  header[13] = 'm';
+  header[14] = 't';
+  header[15] = ' ';
+  header[16] = 0x10;
+  header[17] = 0x00;
+  header[18] = 0x00;
+  header[19] = 0x00;
+  header[20] = 0x01;
+  header[21] = 0x00;
+  header[22] = 0x01;
+  header[23] = 0x00;
+  header[24] = 0x80;
+  header[25] = 0x3E;
+  header[26] = 0x00;
+  header[27] = 0x00;
+  header[28] = 0x00;
+  header[29] = 0x7D;
+  header[30] = 0x00;
+  header[31] = 0x00;
+  header[32] = 0x02;
+  header[33] = 0x00;
+  header[34] = 0x10;
+  header[35] = 0x00;
+  header[36] = 'd';
+  header[37] = 'a';
+  header[38] = 't';
+  header[39] = 'a';
+  header[40] = (byte)(wavSize & 0xFF);
+  header[41] = (byte)((wavSize >> 8) & 0xFF);
+  header[42] = (byte)((wavSize >> 16) & 0xFF);
+  header[43] = (byte)((wavSize >> 24) & 0xFF);
+}
+
+void listSPIFFS(void) {
+  Serial.println(F("\r\nListing SPIFFS files:"));
+  static const char line[] PROGMEM =  "=================================================";
+
+  Serial.println(FPSTR(line));
+  Serial.println(F("  File name                              Size"));
+  Serial.println(FPSTR(line));
+
+  fs::File root = SPIFFS.open("/");
+  if (!root) {
+    Serial.println(F("Failed to open directory"));
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.println(F("Not a directory"));
+    return;
+  }
+
+  fs::File file = root.openNextFile();
+  while (file) {
+    if (file.isDirectory()) {
+      Serial.print("DIR : ");
+      String fileName = file.name();
+      Serial.print(fileName);
+    } else {
+      String fileName = file.name();
+      Serial.print("  " + fileName);
+      // File path can be 31 characters maximum in SPIFFS
+      int spaces = 33 - fileName.length(); // Tabulate nicely
+      if (spaces < 1) spaces = 1;
+      while (spaces--) Serial.print(" ");
+      String fileSize = (String) file.size();
+      spaces = 10 - fileSize.length(); // Tabulate nicely
+      if (spaces < 1) spaces = 1;
+      while (spaces--) Serial.print(" ");
+      Serial.println(fileSize + " bytes");
+    }
+    file = root.openNextFile();
+  }
+  Serial.println(FPSTR(line));
+  Serial.println();
+  delay(1000);
+}
+
+void handleRoot() {
+  server.send(200, "text/plain", "ESP32 SPIFFS Web Server");
+}
+
+void handleDownload() {
+  if (SPIFFS.exists(filename)) {
+    File downloadFile = SPIFFS.open(filename, FILE_READ);
+    server.streamFile(downloadFile, "audio/wav");
+    downloadFile.close();
+  } else {
+    server.send(404, "text/plain", "File not found");
+  }
+}
+
+void setup() {
+  Wire.begin(18, 23);
+  Serial.begin(115200);  // Adjusted for ESP32
+  customKeypad.begin();
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  delay(2000);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 10);
+  // Display static text
+  display.println("Press a key:");
+  display.display();
+
+  SPIFFSInit();
+  i2sInit();
+
+  // Use WiFiManager to connect to WiFi
+  if (!wifiManager.autoConnect("AutoConnectAP")) {
+    Serial.println("Failed to connect and hit timeout");
+    // Handle failed connection
+    ESP.restart();
+  }
+
+  // If we reach here, ESP32 is connected to WiFi
+  Serial.println("Connected to WiFi");
+
+  // Start the web server
+  server.on("/", handleRoot);
+  server.on("/download", handleDownload);
+  server.begin();
+  Serial.println("HTTP server started");
+
+  // Initialize mutex
+  i2sMutex = xSemaphoreCreateMutex();
+}
+
+void loop() {
+  customKeypad.tick();
+  while(customKeypad.available()) {
+    keypadEvent e = customKeypad.read();
+    char key = (char)e.bit.KEY;
+
+    if (e.bit.EVENT == KEY_JUST_PRESSED) {
+      Serial.print(key);
+      Serial.println(" pressed");
+      // Update the OLED display with the key press
+      display.clearDisplay();
+      display.setCursor(0, 10);
+      display.setTextSize(1);
+      display.println("Press a key:");
+      display.setTextSize(2);  // Increase text size for key display
+      display.setCursor(0, 30);
+      display.print("Key: ");
+      display.println(key);
+      display.display();
+
+      if (key == '1') {
+        if (!dacInUse) {
+          xSemaphoreTake(i2sMutex, portMAX_DELAY);
+          setupAudio();
+          playNote();
+          dacInUse = true;
+          xSemaphoreGive(i2sMutex);
+        }
+      } else if (key == '0') {
+        if (dacInUse) {
+          xSemaphoreTake(i2sMutex, portMAX_DELAY);
+          stopNote();
+          dacInUse = false;
+          xSemaphoreGive(i2sMutex);
+        }
+      } else if (key == '2') {
+        if (!isRecording) {
+          isRecording = true;
+          xSemaphoreTake(i2sMutex, portMAX_DELAY);
+          startRecording();
+          xSemaphoreGive(i2sMutex);
+          display.setCursor(0, 50);
+          display.setTextSize(1);
+          display.print("Recording...");
+          display.display();
+          // Do not block here, let the recording happen in the background
+          // Display recording status
+          display.clearDisplay();
+          display.setCursor(0, 10);
+          display.setTextSize(1);
+          display.println("Press a key:");
+          display.setCursor(0, 50);
+          display.print("Record done");
+          display.display();
+          isRecording = false;
+        }
+      }
+    }
+  }
+  server.handleClient();
+  delay(10);
+}
