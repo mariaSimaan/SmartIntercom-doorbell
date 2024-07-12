@@ -1,13 +1,8 @@
-
-// The code records a 20-second audio clip from an I2S microphone and serves it over a web server, 
-//allowing the file to be downloaded via a specified URL.
-// to get the recoed type http://<ip>/download
-#include <WiFiManager.h> // Ensure the library is installed
+#include <WiFiManager.h>
 #include <driver/i2s.h>
 #include <SPIFFS.h>
 #include <WebServer.h>
 
-// Connections to INMP441 I2S microphone
 #define I2S_WS 14
 #define I2S_SD 15
 #define I2S_SCK 32
@@ -82,14 +77,16 @@ void i2s_adc(void *arg) {
 
   Serial.println(" *** Recording Start *** ");
   while (flash_wr_size < FLASH_RECORD_SIZE) {
-    // Read data from I2S bus, in this case, from ADC.
     i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
-    // Save original data from I2S (ADC) into flash.
-    i2s_adc_data_scale(flash_write_buff, (uint8_t*)i2s_read_buff, i2s_read_len);
-    file.write((const byte*) flash_write_buff, i2s_read_len);
-    flash_wr_size += i2s_read_len;
-    Serial.printf("Sound recording %u%%\n", flash_wr_size * 100 / FLASH_RECORD_SIZE);
-    Serial.printf("Never Used Stack Size: %u\n", uxTaskGetStackHighWaterMark(NULL));
+    if (bytes_read > 0) {
+      i2s_adc_data_scale(flash_write_buff, (uint8_t*)i2s_read_buff, i2s_read_len);
+      file.write((const byte*) flash_write_buff, i2s_read_len);
+      flash_wr_size += i2s_read_len;
+      Serial.printf("Sound recording %u%%\n", flash_wr_size * 100 / FLASH_RECORD_SIZE);
+      Serial.printf("Never Used Stack Size: %u\n", uxTaskGetStackHighWaterMark(NULL));
+    } else {
+      Serial.println("I2S read error");
+    }
   }
   file.close();
 
@@ -192,7 +189,6 @@ void listSPIFFS(void) {
     } else {
       String fileName = file.name();
       Serial.print("  " + fileName);
-      // File path can be 31 characters maximum in SPIFFS
       int spaces = 33 - fileName.length(); // Tabulate nicely
       if (spaces < 1) spaces = 1;
       while (spaces--) Serial.print(" ");
