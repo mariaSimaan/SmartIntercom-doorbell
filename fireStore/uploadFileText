@@ -1,0 +1,100 @@
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+#include <SPIFFS.h>
+#include <ArduinoJson.h>
+
+// Provide the token generation process info.
+#include "addons/TokenHelper.h"
+// Provide the RTDB payload printing info and other helper functions.
+#include "addons/RTDBHelper.h"
+
+// Replace these with your WiFi credentials
+#define WIFI_SSID "Raaid"
+#define WIFI_PASSWORD "04102000"
+
+// Firebase project credentials
+#define FIREBASE_PROJECT_ID "smartintercom-b517f"
+#define FIREBASE_API_KEY "AIzaSyAFFmEbQA4_s2ilpv90l0v516sc4BiurZc"
+
+// Firebase storage URL
+#define STORAGE_BUCKET_ID "smartintercom-b517f.appspot.com"
+
+// Define the Firebase Data object
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// Path to the file in Firebase Storage
+String storagePath = "/test.txt";
+String localFilePath = "/test.txt";
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An error has occurred while mounting SPIFFS");
+    return;
+  } else {
+    Serial.println("SPIFFS mounted successfully");
+  }
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println();
+  Serial.println("Connected to Wi-Fi");
+
+  // Assign the API key
+  config.api_key = FIREBASE_API_KEY;
+
+
+  // Initialize Firebase
+  Serial.println("Initializing Firebase...");
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // Sign in anonymously
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Sign in anonymously succeeded");
+  } else {
+    Serial.printf("Sign in anonymously failed: %s\n", config.signer.signupError.message.c_str());
+    return;
+  }
+
+  if (Firebase.ready()) {
+    Serial.println("Firebase is ready");
+
+    // Upload a file to Firebase Storage
+    File file = SPIFFS.open(localFilePath, "r");
+    if (file) {
+      Serial.println("File opened successfully");
+      size_t fileSize = file.size();
+      String fileContent = file.readString();
+      Serial.print("File size: ");
+      Serial.println(fileSize);
+      Serial.print("File content: ");
+      Serial.println(fileContent);
+
+      if (Firebase.Storage.upload(&fbdo, STORAGE_BUCKET_ID, (const uint8_t*)fileContent.c_str(), fileSize, storagePath.c_str(), "text/plain")) {
+        Serial.println("File uploaded successfully");
+      } else {
+        Serial.println("Failed to upload file");
+        Serial.println(fbdo.errorReason());
+      }
+      file.close();
+    } else {
+      Serial.println("Failed to open file for reading");
+    }
+  } else {
+    Serial.println("Firebase is not ready");
+  }
+}
+
+void loop() {
+  // Do nothing
+}
+
