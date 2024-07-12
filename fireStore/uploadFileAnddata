@@ -1,0 +1,137 @@
+#include <WiFiManager.h> // Make sure the WiFiManager library is installed
+#include <Firebase_ESP_Client.h>
+#include <SPIFFS.h>
+#include <ArduinoJson.h>
+
+// Provide the token generation process info.
+#include "addons/TokenHelper.h"
+// Provide the RTDB payload printing info and other helper functions.
+#include "addons/RTDBHelper.h"
+
+// Firebase project credentials
+#define FIREBASE_API_KEY "AIzaSyAFFmEbQA4_s2ilpv90l0v516sc4BiurZc"
+#define PROJECT_ID "smartintercom-b517f"
+// Firebase Storage bucket ID
+#define STORAGE_BUCKET_ID "smartintercom-b517f.appspot.com"
+
+// Define the Firebase Data object
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// Firestore configuration
+FirebaseData firestoreFbdo;
+
+// Path to the file in Firebase Storage
+String storagePath = "/test.txt";
+String localFilePath = "/test.txt";
+
+WiFiManager wifiManager;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An error has occurred while mounting SPIFFS");
+    return;
+  } else {
+    Serial.println("SPIFFS mounted successfully");
+  }
+
+  // Try to connect to existing Wi-Fi network or start AP
+  if (!wifiManager.autoConnect("AutoConnectAP")) {
+    Serial.println("Failed to connect and hit timeout");
+    ESP.restart();
+  }
+
+  Serial.println("Connected to WiFi");
+
+  // Assign the API key
+  config.api_key = FIREBASE_API_KEY;
+
+  // Set the token status callback function
+  config.token_status_callback = tokenStatusCallback; // To enable the token status callback
+
+  // Initialize Firebase
+  Serial.println("Initializing Firebase...");
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // Sign in anonymously
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Sign in anonymously succeeded");
+  } else {
+    Serial.printf("Sign in anonymously failed: %s\n", config.signer.signupError.message.c_str());
+    return;
+  }
+
+  if (Firebase.ready()) {
+    Serial.println("Firebase is ready");
+
+    // Upload a file to Firebase Storage
+    File file = SPIFFS.open(localFilePath, "r");
+    if (file) {
+      Serial.println("File opened successfully");
+      size_t fileSize = file.size();
+      String fileContent = file.readString();
+      Serial.print("File size: ");
+      Serial.println(fileSize);
+      Serial.print("File content: ");
+      Serial.println(fileContent);
+
+      if (Firebase.Storage.upload(&fbdo, STORAGE_BUCKET_ID, (const uint8_t*)fileContent.c_str(), fileSize, storagePath.c_str(), "text/plain")) {
+        Serial.println("File uploaded successfully");
+
+        // Get the URL of the uploaded file
+        String fileUrl = fbdo.downloadURL();
+
+        // Add file information to Firestore
+        FirebaseJson content;
+        content.set("fields/fileName/stringValue", storagePath);
+        content.set("fields/fileUrl/stringValue", fileUrl);
+
+        if (Firebase.Firestore.createDocument(&firestoreFbdo, PROJECT_ID, "", "files", content.raw())) {
+          Serial.println("Firestore document created successfully");
+        } else {
+          Serial.println("Failed to create Firestore document");
+          Serial.println(firestoreFbdo.errorReason());
+        }
+      } else {
+        Serial.println("Failed to upload file");
+        Serial.println(fbdo.errorReason());
+      }
+      file.close();
+    } else {
+      Serial.println("Failed to open file for reading");
+    }
+  } else {
+    Serial.println("Firebase is not ready");
+  }
+}
+
+void loop() {
+  // Check WiFi connection
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Lost connection to WiFi. Trying to reconnect...");
+
+    // Try to reconnect for 10 seconds
+    unsigned long startAttemptTime = millis();
+
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    // If reconnection failed, restart configuration portal
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Failed to reconnect. Restarting configuration portal...");
+      wifiManager.resetSettings(); // Optional - reset settings
+      wifiManager.autoConnect("AutoConnectAP");
+    }
+  }
+
+  delay(1000); // Wait for a second between each check
+}
+
+
