@@ -1,4 +1,4 @@
-#include <WiFi.h>
+#include <WiFiManager.h> // Make sure the WiFiManager library is installed
 #include <Firebase_ESP_Client.h>
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
@@ -8,15 +8,10 @@
 // Provide the RTDB payload printing info and other helper functions.
 #include "addons/RTDBHelper.h"
 
-// Replace these with your WiFi credentials
-#define WIFI_SSID "Raaid"
-#define WIFI_PASSWORD "04102000"
-
 // Firebase project credentials
-#define FIREBASE_PROJECT_ID "smartintercom-b517f"
 #define FIREBASE_API_KEY "AIzaSyAFFmEbQA4_s2ilpv90l0v516sc4BiurZc"
 
-// Firebase storage URL
+// Firebase Storage bucket ID
 #define STORAGE_BUCKET_ID "smartintercom-b517f.appspot.com"
 
 // Define the Firebase Data object
@@ -27,6 +22,8 @@ FirebaseConfig config;
 // Path to the file in Firebase Storage
 String storagePath = "/test.txt";
 String localFilePath = "/test.txt";
+
+WiFiManager wifiManager;
 
 void setup() {
   Serial.begin(115200);
@@ -39,18 +36,19 @@ void setup() {
     Serial.println("SPIFFS mounted successfully");
   }
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi...");
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(500);
+  // Try to connect to existing Wi-Fi network or start AP
+  if (!wifiManager.autoConnect("AutoConnectAP")) {
+    Serial.println("Failed to connect and hit timeout");
+    ESP.restart();
   }
-  Serial.println();
-  Serial.println("Connected to Wi-Fi");
+
+  Serial.println("Connected to WiFi");
 
   // Assign the API key
   config.api_key = FIREBASE_API_KEY;
 
+  // Set the token status callback function
+  config.token_status_callback = tokenStatusCallback; // To enable the token status callback
 
   // Initialize Firebase
   Serial.println("Initializing Firebase...");
@@ -95,6 +93,26 @@ void setup() {
 }
 
 void loop() {
-  // Do nothing
+  // Check WiFi connection
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Lost connection to WiFi. Trying to reconnect...");
+
+    // Try to reconnect for 10 seconds
+    unsigned long startAttemptTime = millis();
+
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    // If reconnection failed, restart configuration portal
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Failed to reconnect. Restarting configuration portal...");
+      wifiManager.resetSettings(); // Optional - reset settings
+      wifiManager.autoConnect("AutoConnectAP");
+    }
+  }
+
+  delay(1000); // Wait for a second between each check
 }
 
