@@ -11,6 +11,7 @@
 // Firebase project credentials
 #define FIREBASE_API_KEY "AIzaSyAFFmEbQA4_s2ilpv90l0v516sc4BiurZc"
 #define PROJECT_ID "smartintercom-b517f"
+
 // Firebase Storage bucket ID
 #define STORAGE_BUCKET_ID "smartintercom-b517f.appspot.com"
 
@@ -38,6 +39,16 @@ void setup() {
   } else {
     Serial.println("SPIFFS mounted successfully");
   }
+
+  // Create a file named "test.txt" with the content "Hello, World!"
+  File file = SPIFFS.open(localFilePath, "w");
+  if (!file) {
+    Serial.println("Failed to create file");
+    return;
+  }
+  file.print("Hello, World!");
+  file.close();
+  Serial.println("File created successfully");
 
   // Try to connect to existing Wi-Fi network or start AP
   if (!wifiManager.autoConnect("AutoConnectAP")) {
@@ -70,7 +81,7 @@ void setup() {
     Serial.println("Firebase is ready");
 
     // Upload a file to Firebase Storage
-    File file = SPIFFS.open(localFilePath, "r");
+    file = SPIFFS.open(localFilePath, "r");
     if (file) {
       Serial.println("File opened successfully");
       size_t fileSize = file.size();
@@ -133,5 +144,4 @@ void loop() {
 
   delay(1000); // Wait for a second between each check
 }
-
 
