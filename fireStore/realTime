@@ -1,0 +1,178 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <FirebaseClient.h>
+#include <WiFiClientSecure.h>
+#include <Base64.h>
+#include <SPIFFS.h>
+
+// Replace with your network credentials and Firebase details
+#define WIFI_SSID "Maria Simaan"
+#define WIFI_PASSWORD "maria1234"
+#define DATABASE_SECRET "AIzaSyAFFmEbQA4_s2ilpv90l0v516sc4BiurZc"
+#define DATABASE_URL "https://smartintercom-b517f-default-rtdb.europe-west1.firebasedatabase.app/"
+
+WiFiClientSecure ssl;
+DefaultNetwork network;
+AsyncClientClass client(ssl, getNetwork(network));
+
+FirebaseApp app;
+RealtimeDatabase Database;
+AsyncResult result;
+LegacyToken dbSecret(DATABASE_SECRET);
+
+void listSPIFFSFiles() {
+  Serial.println("Listing files in SPIFFS:");
+  File root = SPIFFS.open("/");
+  File file = root.openNextFile();
+  while (file) {
+    Serial.print("FILE: ");
+    Serial.println(file.name());
+    file = root.openNextFile();
+  }
+  Serial.println("Done listing files.");
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An error occurred while mounting SPIFFS");
+    return;
+  }
+
+  Firebase.printf("Firebase Client v%s\n", FIREBASE_CLIENT_VERSION);
+
+  ssl.setInsecure();
+
+  // Initialize the authentication handler.
+  initializeApp(client, app, getAuth(dbSecret));
+
+  // Binding the authentication handler with your Database class object.
+  app.getApp<RealtimeDatabase>(Database);
+
+  // Set your database URL
+  Database.url(DATABASE_URL);
+
+  // In sync functions, we have to set the operating result for the client that works with the function.
+  client.setAsyncResult(result);
+
+  // List all files in SPIFFS
+  listSPIFFSFiles();
+
+  // Test string upload
+  if (sendTestString()) {
+    Serial.println("Test string sent to Firebase successfully.");
+  } else {
+    Serial.println("Failed to send test string.");
+  }
+
+  // Check if file exists
+  if (SPIFFS.exists("/start_message.wav")) {
+    Serial.println("WAV file exists. Proceeding to send...");
+    // Read, encode, and send the WAV file to Firebase Realtime Database
+    if (sendWavFile("/start_message.wav")) {
+      Serial.println("WAV file sent to Firebase successfully.");
+    } else {
+      Serial.println("Failed to send WAV file.");
+    }
+  } else {
+    Serial.println("WAV file does not exist in SPIFFS.");
+  }
+}
+
+void loop() {
+  // Nothing to do here
+}
+
+bool sendTestString() {
+  String testPath = "/ICST/TestString";
+  String testValue = "This is a test";
+
+  Serial.println("Sending test string...");
+  bool success = Database.set<String>(client, testPath.c_str(), testValue);
+  if (success) {
+    Serial.println("Test string uploaded successfully.");
+  } else {
+    Serial.println("Failed to upload test string.");
+    Serial.printf("Error: %s\n", result.error().message().c_str());
+  }
+  return success;
+}
+
+bool sendWavFile(const char* filename) {
+  File file = SPIFFS.open(filename, FILE_READ);
+  if (!file) {
+    Serial.println("Failed to open WAV file for reading");
+    return false;
+  }
+
+  Serial.println("WAV file opened successfully.");
+  size_t fileSize = file.size();
+  Serial.printf("WAV file size: %d bytes\n", fileSize);
+
+  // Reset file pointer to the beginning
+  file.seek(0, SeekSet);
+
+  const size_t bufferSize = 512 * 8;
+  uint8_t buffer[bufferSize];
+  size_t bytesRead;
+  size_t chunkIndex = 0;
+
+  Serial.println("Reading and encoding WAV file...");
+
+  while ((bytesRead = file.read(buffer, bufferSize)) > 0) {
+    Serial.printf("Read %d bytes from WAV file at position %d\n", bytesRead, file.position());
+
+    if (bytesRead > 0) {
+      String encodedChunk = base64::encode(buffer, bytesRead);
+      String path = String("/ICST/WAVString/chunk") + chunkIndex;
+
+      // Try to set data to Firebase and log the result
+      bool success = Database.set<String>(client, path.c_str(), encodedChunk);
+      if (success) {
+        Serial.printf("Chunk %d uploaded successfully\n", chunkIndex);
+        chunkIndex++;
+      } else {
+        Serial.printf("Failed to upload chunk %d\n", chunkIndex);
+        Serial.printf("Error: %s\n", result.error().message().c_str());
+        file.close();
+        return false;
+      }
+    } else {
+      Serial.println("No data read from file.");
+    }
+
+    delay(100);  // Small delay to avoid overwhelming the server
+  }
+
+  if (chunkIndex == 0) {
+    Serial.println("No chunks were processed.");
+  }
+
+  Serial.println("Finished reading and encoding WAV file.");
+  file.close();
+
+  // Fallback test read
+  file = SPIFFS.open(filename, FILE_READ);
+  if (!file) {
+    Serial.println("Failed to reopen WAV file for reading");
+    return false;
+  }
+  Serial.println("Reopened WAV file for fallback read test.");
+  bytesRead = file.read(buffer, bufferSize);
+  Serial.printf("Fallback read %d bytes from WAV file\n", bytesRead);
+  file.close();
+
+  return true;
+}
