@@ -10,7 +10,7 @@
 #define I2S_SAMPLE_RATE   (16000)
 #define I2S_SAMPLE_BITS   (16)
 #define I2S_READ_LEN      (16 * 1024)
-#define RECORD_TIME       (20) // Seconds
+#define RECORD_TIME       (5) // Seconds
 #define I2S_CHANNEL_NUM   (1)
 #define FLASH_RECORD_SIZE (I2S_CHANNEL_NUM * I2S_SAMPLE_RATE * I2S_SAMPLE_BITS / 8 * RECORD_TIME)
 
@@ -20,7 +20,7 @@
 #define DAC_DATA_PIN 22
 
 File file;
-const char filename[] = "/recording.wav";
+const char filename[] = "/start_message.wav";
 const int headerSize = 44;
 bool recordingComplete = false;
 
@@ -308,7 +308,7 @@ void setupDAC() {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX), // Master transmitter
     .sample_rate = I2S_SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_I2S_MSB,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1, // Interrupt level 1
     .dma_buf_count = 8,
