@@ -1,0 +1,90 @@
+void i2s_adc(void *arg) {
+    size_t freeHeap = ESP.getFreeHeap();
+    size_t maxAllocHeap = ESP.getMaxAllocHeap();
+
+    Serial.printf("Free Heap: %d bytes\n", freeHeap);
+    Serial.printf("Max Allocatable Heap: %d bytes\n", maxAllocHeap);
+
+    size_t buffer_size = 1024; // Start with 1KB
+    char* i2s_read_buff = nullptr;
+    uint8_t* flash_write_buff = nullptr;
+
+    // Dynamically find the maximum allocatable buffer size
+    while (buffer_size <= maxAllocHeap) {
+        i2s_read_buff = (char*) malloc(buffer_size);
+        flash_write_buff = (uint8_t*) malloc(buffer_size);
+        if (i2s_read_buff && flash_write_buff) {
+            free(i2s_read_buff); // Free immediately if successful
+            free(flash_write_buff);
+            buffer_size += 1024; // Try to allocate a larger buffer
+        } else {
+            if (i2s_read_buff) free(i2s_read_buff);
+            if (flash_write_buff) free(flash_write_buff);
+            buffer_size -= 1024; // Reduce on failure to fit
+            break;
+        }
+    }
+
+    if (buffer_size <= 0) {
+        Serial.println("Failed to allocate any buffer.");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Allocate buffers for actual use
+    i2s_read_buff = (char*) malloc(buffer_size);
+    flash_write_buff = (uint8_t*) malloc(buffer_size);
+
+    if (!i2s_read_buff || !flash_write_buff) {
+        Serial.println("Failed to allocate memory for final buffers.");
+        if (i2s_read_buff) free(i2s_read_buff);
+        if (flash_write_buff) free(flash_write_buff);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    Serial.printf("Allocated buffer size: %d bytes\n", buffer_size);
+
+  int flash_wr_size = 0;
+  size_t bytes_read;
+
+  i2s_read(I2S_PORT, (void*) i2s_read_buff, buffer_size, &bytes_read, portMAX_DELAY);
+  i2s_read(I2S_PORT, (void*) i2s_read_buff, buffer_size, &bytes_read, portMAX_DELAY);
+
+  Serial.println(" *** Recording Start *** ");
+  while (flash_wr_size < FLASH_RECORD_SIZE) {
+    i2s_read(I2S_PORT, (void*) i2s_read_buff, buffer_size, &bytes_read, portMAX_DELAY);
+    if (bytes_read > 0) {
+      Serial.printf("Bytes read from I2S: %d\n", bytes_read);
+      i2s_adc_data_scale(flash_write_buff, (uint8_t*)i2s_read_buff, buffer_size);
+
+      size_t bytes_written = file.write((const byte*) flash_write_buff, buffer_size);
+      if (bytes_written != buffer_size) {
+        Serial.printf("Error writing to file: expected %d, wrote %d\n", buffer_size, bytes_written);
+      } else {
+        Serial.printf("Successfully written %d bytes to file\n", bytes_written);
+      }
+      file.flush(); // Ensure data is written to the file
+
+      flash_wr_size += bytes_written;
+      Serial.printf("Sound recording %u%%\n", flash_wr_size * 100 / FLASH_RECORD_SIZE);
+      Serial.printf("Never Used Stack Size: %u\n", uxTaskGetStackHighWaterMark(NULL));
+    } else {
+      Serial.println("I2S read error");
+    }
+  }
+  file.close();
+
+  free(i2s_read_buff);
+  free(flash_write_buff);
+
+  Serial.println(" *** Recording Finished *** ");
+  recordingComplete = true;
+  listSPIFFS();
+
+  // Uninstall I2S driver for recording
+  i2s_driver_uninstall(I2S_PORT);
+
+  recordingTaskHandle = NULL;  // Set the task handle to NULL
+  vTaskDelete(NULL);
+}
