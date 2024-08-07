@@ -1,0 +1,360 @@
+#include <WiFiManager.h>
+#include <driver/i2s.h>
+#include <LittleFS.h>
+#include <WebServer.h>
+
+#define I2S_WS 14
+#define I2S_SD 15
+#define I2S_SCK 32
+#define I2S_PORT I2S_NUM_0
+#define I2S_SAMPLE_RATE   (16000)
+#define I2S_SAMPLE_BITS   (16)
+#define I2S_READ_LEN      (16 * 1024)
+#define RECORD_TIME       (5) // Seconds
+#define I2S_CHANNEL_NUM   (1)
+#define FLASH_RECORD_SIZE (I2S_CHANNEL_NUM * I2S_SAMPLE_RATE * I2S_SAMPLE_BITS / 8 * RECORD_TIME)
+
+// Define pins for external DAC
+#define DAC_BCK_PIN 26
+#define DAC_WS_PIN 25
+#define DAC_DATA_PIN 22
+
+File file;
+const char filename[] = "/start_message.wav";
+const int headerSize = 44;
+bool recordingComplete = false;
+
+WiFiManager wifiManager;
+WebServer server(80);
+
+void LittleFSInit() {
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS initialization failed!");
+    while (1) yield();
+  } else {
+    Serial.println("LittleFS initialized successfully.");
+  }
+
+  Serial.println("Listing LittleFS files:");
+  File root = LittleFS.open("/");
+  if (!root) {
+    Serial.println("Failed to open directory");
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.println("Not a directory");
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    Serial.print("FILE: ");
+    Serial.print(file.name());
+    Serial.print("  SIZE: ");
+    Serial.println(file.size());
+    file = root.openNextFile();
+  }
+}
+
+
+void i2sInit() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = I2S_SAMPLE_RATE,
+    .bits_per_sample = i2s_bits_per_sample_t(I2S_SAMPLE_BITS),
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
+    .intr_alloc_flags = 0,
+    .dma_buf_count = 64,
+    .dma_buf_len = 1024,
+    .use_apll = 1
+  };
+
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+
+  const i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_SCK,
+    .ws_io_num = I2S_WS,
+    .data_out_num = -1,
+    .data_in_num = I2S_SD
+  };
+
+  i2s_set_pin(I2S_PORT, &pin_config);
+}
+
+void i2s_adc_data_scale(uint8_t * d_buff, uint8_t* s_buff, uint32_t len) {
+  uint32_t j = 0;
+  uint32_t dac_value = 0;
+  for (int i = 0; i < len; i += 2) {
+    dac_value = ((((uint16_t) (s_buff[i + 1] & 0xf) << 8) | ((s_buff[i + 0]))));
+    d_buff[j++] = 0;
+    d_buff[j++] = dac_value * 256 / 2048;
+  }
+}
+
+void i2s_adc(void *arg) {
+  int i2s_read_len = I2S_READ_LEN;
+  int flash_wr_size = 0;
+  size_t bytes_read;
+
+  char* i2s_read_buff = (char*) calloc(i2s_read_len, sizeof(char));
+  uint8_t* flash_write_buff = (uint8_t*) calloc(i2s_read_len, sizeof(char));
+
+  i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
+  i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
+
+  Serial.println(" *** Recording Start *** ");
+  while (flash_wr_size < FLASH_RECORD_SIZE) {
+    i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
+    if (bytes_read > 0) {
+      i2s_adc_data_scale(flash_write_buff, (uint8_t*)i2s_read_buff, i2s_read_len);
+      file.write((const byte*) flash_write_buff, i2s_read_len);
+      flash_wr_size += i2s_read_len;
+      Serial.printf("Sound recording %u%%\n", flash_wr_size * 100 / FLASH_RECORD_SIZE);
+      Serial.printf("Never Used Stack Size: %u\n", uxTaskGetStackHighWaterMark(NULL));
+    } else {
+      Serial.println("I2S read error");
+    }
+  }
+  file.close();
+
+  free(i2s_read_buff);
+  i2s_read_buff = NULL;
+  free(flash_write_buff);
+  flash_write_buff = NULL;
+
+  Serial.println(" *** Recording Finished *** ");
+  recordingComplete = true;
+
+  // Uninstall I2S driver for recording
+  i2s_driver_uninstall(I2S_PORT);
+  vTaskDelete(NULL);
+}
+
+void startRecording() {
+  file = LittleFS.open(filename, FILE_WRITE);
+  if (!file) {
+    Serial.println("File is not available!");
+    return;
+  }
+
+  byte header[headerSize];
+  wavHeader(header, FLASH_RECORD_SIZE);
+  file.write(header, headerSize);
+
+  xTaskCreatePinnedToCore(i2s_adc, "i2s_adc", 4096, NULL, 1, NULL, 1);
+}
+
+void wavHeader(byte* header, int wavSize) {
+  header[0] = 'R';
+  header[1] = 'I';
+  header[2] = 'F';
+  header[3] = 'F';
+  unsigned int fileSize = wavSize + headerSize - 8;
+  header[4] = (byte)(fileSize & 0xFF);
+  header[5] = (byte)((fileSize >> 8) & 0xFF);
+  header[6] = (byte)((fileSize >> 16) & 0xFF);
+  header[7] = (byte)((fileSize >> 24) & 0xFF);
+  header[8] = 'W';
+  header[9] = 'A';
+  header[10] = 'V';
+  header[11] = 'E';
+  header[12] = 'f';
+  header[13] = 'm';
+  header[14] = 't';
+  header[15] = ' ';
+  header[16] = 0x10;
+  header[17] = 0x00;
+  header[18] = 0x00;
+  header[19] = 0x00;
+  header[20] = 0x01;
+  header[21] = 0x00;
+  header[22] = 0x01;
+  header[23] = 0x00;
+  header[24] = 0x80;
+  header[25] = 0x3E;
+  header[26] = 0x00;
+  header[27] = 0x00;
+  header[28] = 0x00;
+  header[29] = 0x7D;
+  header[30] = 0x00;
+  header[31] = 0x00;
+  header[32] = 0x02;
+  header[33] = 0x00;
+  header[34] = 0x10;
+  header[35] = 0x00;
+  header[36] = 'd';
+  header[37] = 'a';
+  header[38] = 't';
+  header[39] = 'a';
+  header[40] = (byte)(wavSize & 0xFF);
+  header[41] = (byte)((wavSize >> 8) & 0xFF);
+  header[42] = (byte)((wavSize >> 16) & 0xFF);
+  header[43] = (byte)((wavSize >> 24) & 0xFF);
+}
+
+
+void handleRoot() {
+  server.send(200, "text/plain", "ESP32 LittleFS Web Server");
+}
+
+void handleDownload() {
+  if (LittleFS.exists(filename)) {
+    File downloadFile = LittleFS.open(filename, FILE_READ);
+    server.streamFile(downloadFile, "audio/wav");
+    downloadFile.close();
+  } else {
+    server.send(404, "text/plain", "File not found");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize LittleFS and I2S
+  LittleFSInit();
+  i2sInit();
+
+  // Use WiFiManager to connect to WiFi
+  if (!wifiManager.autoConnect("AutoConnectAP")) {
+    Serial.println("Failed to connect and hit timeout");
+    // Handle failed connection
+    ESP.restart();
+  }
+
+  // If we reach here, ESP32 is connected to WiFi
+  Serial.println("Connected to WiFi");
+
+  // Start recording task
+  startRecording();
+
+  // Start the web server
+  server.on("/", handleRoot);
+  server.on("/download", handleDownload);
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+
+  // Check WiFi connection status
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Lost connection to WiFi. Trying to reconnect...");
+
+    // Attempt to reconnect for 10 seconds
+    unsigned long startAttemptTime = millis();
+
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+
+    // If unable to reconnect
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Failed to reconnect. Restarting configuration portal...");
+      wifiManager.resetSettings(); // Optional - reset settings
+      wifiManager.autoConnect("AutoConnectAP");
+    }
+  }
+
+  delay(1000); // Wait for 1 second between each check
+
+  // Call playRecording() after recording is complete
+  if (recordingComplete) {
+    delay(5000); // Ensure recording is complete before playback
+    Serial.println("Starting playback...");
+    setupDAC(); // Setup DAC only after recording is done
+    playRecording();
+    recordingComplete = false;
+  }
+}
+
+void disableDAC() {
+    // Uninstall the I2S driver
+    esp_err_t err = i2s_driver_uninstall(I2S_PORT);
+    if (err != ESP_OK) {
+        Serial.printf("Failed to uninstall I2S driver: %d\n", err);
+    } else {
+        Serial.println("DAC disabled successfully.");
+    }
+}
+
+
+// Function to setup DAC
+void setupDAC() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX), // Master transmitter
+    .sample_rate = I2S_SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1, // Interrupt level 1
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false  // Set to true if using APLL (ESP32-S2 specific)
+  };
+
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = DAC_BCK_PIN,   // BCK pin
+    .ws_io_num = DAC_WS_PIN,    // LRCK pin
+    .data_out_num = DAC_DATA_PIN, // DATA pin
+    .data_in_num = I2S_PIN_NO_CHANGE // Not used
+  };
+
+  // Install and start I2S driver for DAC
+  esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to install I2S driver: %d\n", err);
+    return;
+  }
+  err = i2s_set_pin(I2S_PORT, &pin_config);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to set I2S pins: %d\n", err);
+    return;
+  }
+  Serial.println("DAC setup complete.");
+}
+
+void playRecording() {
+  if (!LittleFS.exists(filename)) {
+    Serial.println("Recorded file not found!");
+    return;
+  }
+
+  File playbackFile = LittleFS.open(filename, FILE_READ);
+  if (!playbackFile) {
+    Serial.println("Failed to open recorded file!");
+    return;
+  }
+
+  // Skip the WAV header
+  playbackFile.seek(headerSize, SeekSet);
+
+  uint8_t *dataBuffer = (uint8_t *)malloc(I2S_READ_LEN);
+  size_t bytesRead;
+  if (!dataBuffer) {
+    Serial.println("Failed to allocate memory for playback buffer!");
+    playbackFile.close();
+    return;
+  }
+
+  Serial.println(" *** Playback Start *** ");
+  while ((bytesRead = playbackFile.read(dataBuffer, I2S_READ_LEN)) > 0) {
+    size_t bytesWritten;
+    esp_err_t err = i2s_write(I2S_PORT, dataBuffer, bytesRead, &bytesWritten, portMAX_DELAY);
+    if (err != ESP_OK) {
+      Serial.printf("Failed to write to I2S: %d\n", err);
+      break;
+    }
+    if (bytesWritten != bytesRead) {
+      Serial.printf("Bytes written (%d) do not match bytes read (%d)\n", bytesWritten, bytesRead);
+    }
+  }
+
+  free(dataBuffer);
+  playbackFile.close();
+  Serial.println(" *** Playback Finished *** ");
+
+  disableDAC();
+}
