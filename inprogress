@@ -1,0 +1,844 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_Keypad.h>
+#include <Arduino.h>
+#include <driver/i2s.h>
+#include <math.h>
+#include <WiFi.h>
+#include <WiFiManager.h>
+#include <LittleFS.h>
+#include <WebServer.h>
+#include <WiFiClientSecure.h>
+#include <FirebaseClient.h>
+#include <Base64.h>
+#include <HTTPClient.h>
+#include "freertos/FreeRTOS.h"  // Ensure FreeRTOS.h is included
+#include "freertos/task.h"
+
+
+// Replace with your network credentials and Firebase details
+#define FIREBASE_HOST "https://smartintercom-b517f-default-rtdb.europe-west1.firebasedatabase.app/"
+#define FIREBASE_AUTH "AIzaSyAFFmEbQA4_s2ilpv90l0v516sc4BiurZc"
+#define DATABASE_SECRET "AIzaSyAFFmEbQA4_s2ilpv90l0v516sc4BiurZc"
+#define DATABASE_URL "https://smartintercom-b517f-default-rtdb.europe-west1.firebasedatabase.app/"
+
+WiFiClientSecure ssl;
+DefaultNetwork network;
+AsyncClientClass client(ssl, getNetwork(network));
+
+FirebaseApp app;
+RealtimeDatabase Database;
+AsyncResult result;
+LegacyToken dbSecret(DATABASE_SECRET);
+
+// OLED display width and height, in pixels
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// define your specific keypad here via PID
+#define KEYPAD_PID3845
+
+// define your pins here
+#define R4   19 
+#define R3   13 
+#define R2   12 
+#define R1   4    
+#define C1   21 
+#define C2   27 
+#define C3   33  
+
+// Keymap for 3x4 Keypad
+char keys[4][3] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
+
+// Row and column pins for 3x4 Keypad
+byte rowPins[4] = { R1, R2, R3, R4 };
+byte colPins[3] = { C1, C2, C3 };
+
+// Initialize an instance of class Adafruit_Keypad
+Adafruit_Keypad customKeypad = Adafruit_Keypad(makeKeymap(keys), rowPins, colPins, 4, 3);
+
+// I2S configuration constants
+#define I2S_NUM         (0) // I2S port number
+#define I2S_SAMPLE_RATE (16000)
+#define I2S_BITS        (16)
+#define I2S_CHANNELS    (1)
+#define I2S_SAMPLE_BITS   (16)
+#define I2S_READ_LEN      (8 * 1024 )
+#define RECORD_TIME       (5) // Seconds
+#define FLASH_RECORD_SIZE (I2S_CHANNELS * I2S_SAMPLE_RATE * I2S_SAMPLE_BITS / 8 * RECORD_TIME)
+
+// Connections to INMP441 I2S microphone
+#define I2S_WS 14
+#define I2S_SD 15
+#define I2S_SCK 32
+#define I2S_PORT I2S_NUM_0
+
+// Define pins for external DAC
+#define DAC_BCK_PIN 26
+#define DAC_WS_PIN 25
+#define DAC_DATA_PIN 22
+
+File file;
+const char filename[] = "/recording.wav";
+const int headerSize = 44;
+bool recordingComplete = false;
+
+WiFiManager wifiManager;
+WebServer server(80);
+
+bool isRecording = false;
+bool isRecorded = false; // New variable to check if recording is done
+SemaphoreHandle_t i2sMutex;
+
+TaskHandle_t recordingTaskHandle = NULL;
+
+String inputSequence = ""; // Variable to store key input sequence
+String enteredPassword = ""; // Variable to store key input sequence
+
+
+void displayMessage(const char* message, int duration, int size) {
+  display.clearDisplay();
+  display.setCursor(0, 20);
+  display.setTextSize(size);
+  display.println(message);
+  display.display();
+  if (duration > 0) {
+    delay(duration);
+  }
+}
+
+void displayOpenedMessage(const char* message, int duration) {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+
+  String msg = String(message);
+  int lineHeight = 20;  // Height of each line
+
+  int y = 0;
+  int start = 0;
+  int end = msg.indexOf(' ');
+  while (end != -1) {
+    String line = msg.substring(start, end);
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(line, 0, y, &x1, &y1, &w, &h);
+    int x = (SCREEN_WIDTH - w) / 2;  // Center horizontally
+    display.setCursor(x, y);
+    display.println(line);
+    y += lineHeight;
+    start = end + 1;
+    end = msg.indexOf(' ', start);
+  }
+  String line = msg.substring(start);  // Print the last word
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(line, 0, y, &x1, &y1, &w, &h);
+  int x = (SCREEN_WIDTH - w) / 2;  // Center horizontally
+  display.setCursor(x, y);
+  display.println(line);
+
+  display.display();
+  if (duration > 0) {
+    delay(duration);
+  }
+}
+
+
+void LittleFSInit() {
+  if (!LittleFS.begin(true)) {
+    Serial.println("LittleFS initialization failed!");
+    while (1) yield();
+  } else {
+    Serial.println("LittleFS initialized successfully.");
+  }
+
+  Serial.println("Listing LittleFS files:");
+  File root = LittleFS.open("/");
+  if (!root) {
+    Serial.println("Failed to open directory");
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.println("Not a directory");
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    Serial.print("FILE: ");
+    Serial.print(file.name());
+    Serial.print("  SIZE: ");
+    Serial.println(file.size());
+    file = root.openNextFile();
+  }
+}
+
+
+void i2sInit() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = I2S_SAMPLE_RATE,
+    .bits_per_sample = i2s_bits_per_sample_t(I2S_SAMPLE_BITS),
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
+    .intr_alloc_flags = 0,
+    .dma_buf_count = 64,
+    .dma_buf_len = 1024,
+    .use_apll = 1
+  };
+
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+
+  const i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_SCK,
+    .ws_io_num = I2S_WS,
+    .data_out_num = -1,
+    .data_in_num = I2S_SD
+  };
+
+  i2s_set_pin(I2S_PORT, &pin_config);
+}
+
+void i2s_adc_data_scale(uint8_t * d_buff, uint8_t* s_buff, uint32_t len) {
+  uint32_t j = 0;
+  uint32_t dac_value = 0;
+  for (int i = 0; i < len; i += 2) {
+    dac_value = ((((uint16_t) (s_buff[i + 1] & 0xf) << 8) | ((s_buff[i + 0]))));
+    d_buff[j++] = 0;
+    d_buff[j++] = dac_value * 256 / 2048;
+  }
+}
+
+#define DEBUG true
+
+void i2s_adc(void *arg) {
+  int i2s_read_len = I2S_READ_LEN;
+  int flash_wr_size = 0;
+  size_t bytes_read;
+
+  char* i2s_read_buff = (char*) calloc(i2s_read_len, sizeof(char));
+  uint8_t* flash_write_buff = (uint8_t*) calloc(i2s_read_len, sizeof(char));
+
+  if (!i2s_read_buff || !flash_write_buff) {
+    Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("Failed to allocate memory for buffers");
+    if (i2s_read_buff) free(i2s_read_buff);
+    if (flash_write_buff) free(flash_write_buff);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  if (DEBUG) {
+    Serial.printf("Total LittleFS space: %d, Used LittleFS space: %d\n", LittleFS.totalBytes(), LittleFS.usedBytes());
+  }
+
+  i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
+  i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
+
+  Serial.println(" *** Recording Start *** ");
+  while (flash_wr_size < FLASH_RECORD_SIZE) {
+    i2s_read(I2S_PORT, (void*) i2s_read_buff, i2s_read_len, &bytes_read, portMAX_DELAY);
+    if (bytes_read > 0) {
+      Serial.printf("Bytes read from I2S: %d\n", bytes_read);
+      i2s_adc_data_scale(flash_write_buff, (uint8_t*)i2s_read_buff, i2s_read_len);
+
+      if (DEBUG) {
+        // Print a few bytes of the flash_write_buff to check data validity
+        Serial.print("flash_write_buff data: ");
+        for (int i = 0; i < min(10, i2s_read_len); i++) {
+          Serial.printf("%02X ", flash_write_buff[i]);
+        }
+        Serial.println();
+      }
+
+      size_t bytes_written = file.write((const byte*) flash_write_buff, i2s_read_len);
+      if (bytes_written != i2s_read_len) {
+        Serial.printf("Error writing to file: expected %d, wrote %d\n", i2s_read_len, bytes_written);
+      } else {
+        Serial.printf("Successfully written %d bytes to file\n", bytes_written);
+      }
+      file.flush(); // Ensure data is written to the file
+
+      flash_wr_size += bytes_written;
+      Serial.printf("Sound recording %u%%\n", flash_wr_size * 100 / FLASH_RECORD_SIZE);
+      Serial.printf("Never Used Stack Size: %u\n", uxTaskGetStackHighWaterMark(NULL));
+    } else {
+      Serial.println("I2S read error");
+    }
+    vTaskDelay(1);  // Reset watchdog timer
+  }
+
+  file.close();
+
+  free(i2s_read_buff);
+  free(flash_write_buff);
+
+  Serial.println(" *** Recording Finished *** ");
+  recordingComplete = true;
+  listLittleFS();
+
+  // Uninstall I2S driver for recording
+  i2s_driver_uninstall(I2S_PORT);
+
+  recordingTaskHandle = NULL;  // Set the task handle to NULL
+  vTaskDelete(NULL);
+}
+
+
+
+void startRecording() {
+   
+   inputSequence = "";
+  if (recordingTaskHandle != NULL) {
+    Serial.println("Recording task is already running, cannot start another recording.");
+    return;
+  }
+
+  if (LittleFS.exists(filename)) {
+    LittleFS.remove(filename);
+  }
+
+  file = LittleFS.open(filename, FILE_WRITE);
+  if (!file) {
+    Serial.println("File is not available!");
+    return;
+  }
+
+  byte header[headerSize];
+  wavHeader(header, FLASH_RECORD_SIZE);
+  file.write(header, headerSize);
+
+  // Reinitialize I2S for recording
+  i2sInit();
+
+  BaseType_t xReturned = xTaskCreatePinnedToCore(i2s_adc, "i2s_adc", 4096, NULL, 1, &recordingTaskHandle, 1);
+  if (xReturned != pdPASS) {
+    Serial.println("Failed to create recording task");
+    recordingTaskHandle = NULL;
+    file.close();
+  }
+}
+
+void wavHeader(byte* header, int wavSize) {
+  header[0] = 'R';
+  header[1] = 'I';
+  header[2] = 'F';
+  header[3] = 'F';
+  unsigned int fileSize = wavSize + headerSize - 8;
+  header[4] = (byte)(fileSize & 0xFF);
+  header[5] = (byte)((fileSize >> 8) & 0xFF);
+  header[6] = (byte)((fileSize >> 16) & 0xFF);
+  header[7] = (byte)((fileSize >> 24) & 0xFF);
+  header[8] = 'W';
+  header[9] = 'A';
+  header[10] = 'V';
+  header[11] = 'E';
+  header[12] = 'f';
+  header[13] = 'm';
+  header[14] = 't';
+  header[15] = ' ';
+  header[16] = 0x10;
+  header[17] = 0x00;
+  header[18] = 0x00;
+  header[19] = 0x00;
+  header[20] = 0x01;
+  header[21] = 0x00;
+  header[22] = 0x01;
+  header[23] = 0x00;
+  header[24] = 0x80;
+  header[25] = 0x3E;
+  header[26] = 0x00;
+  header[27] = 0x00;
+  header[28] = 0x00;
+  header[29] = 0x7D;
+  header[30] = 0x00;
+  header[31] = 0x00;
+  header[32] = 0x02;
+  header[33] = 0x00;
+  header[34] = 0x10;
+  header[35] = 0x00;
+  header[36] = 'd';
+  header[37] = 'a';
+  header[38] = 't';
+  header[39] = 'a';
+  header[40] = (byte)(wavSize & 0xFF);
+  header[41] = (byte)((wavSize >> 8) & 0xFF);
+  header[42] = (byte)((wavSize >> 16) & 0xFF);
+  header[43] = (byte)((wavSize >> 24) & 0xFF);
+}
+
+void listLittleFS(void) {
+  Serial.println(F("\r\nListing LittleFS files:"));
+  static const char line[] PROGMEM =  "=================================================";
+
+  Serial.println(FPSTR(line));
+  Serial.println(F("  File name                              Size"));
+  Serial.println(FPSTR(line));
+
+  fs::File root = LittleFS.open("/");
+  if (!root) {
+    Serial.println(F("Failed to open directory"));
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.println(F("Not a directory"));
+    return;
+  }
+
+  fs::File file = root.openNextFile();
+  while (file) {
+    if (file.isDirectory()) {
+      Serial.print("DIR : ");
+      String fileName = file.name();
+      Serial.print(fileName);
+    } else {
+      String fileName = file.name();
+      Serial.print("  " + fileName);
+      int spaces = 33 - fileName.length(); // Tabulate nicely
+      if (spaces < 1) spaces = 1;
+      while (spaces--) Serial.print(" ");
+      String fileSize = (String) file.size();
+      spaces = 10 - fileSize.length(); // Tabulate nicely
+      if (spaces < 1) spaces = 1;
+      while (spaces--) Serial.print(" ");
+      Serial.println(fileSize + " bytes");
+    }
+    file = root.openNextFile();
+  }
+  Serial.println(FPSTR(line));
+  Serial.println();
+  delay(1000);
+}
+
+void handleRoot() {
+  server.send(200, "text/plain", "ESP32 LittleFS Web Server");
+}
+
+void handleDownload() {
+  if (LittleFS.exists(filename)) {
+    File downloadFile = LittleFS.open(filename, FILE_READ);
+    server.streamFile(downloadFile, "audio/wav");
+    downloadFile.close();
+  } else {
+    server.send(404, "text/plain", "File not found");
+  }
+}
+
+void connectToWiFi() {
+  WiFi.begin();
+
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    Serial.println("Connecting to WiFi...");
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 10);
+    display.println("Trying to connect");
+    display.println("to WiFi...");
+    display.display();
+
+    delay(500);
+    retries++;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Starting WiFiManager AP mode...");
+    wifiManager.autoConnect("AutoConnectAP");
+
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+    }
+  }
+
+  Serial.println("Connected to WiFi");
+  displayMessage("Press * to start", 0, 1);
+
+  server.on("/", handleRoot);
+  server.on("/download", handleDownload);
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void disableDAC() {
+  esp_err_t err = i2s_driver_uninstall(I2S_PORT);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to uninstall I2S driver: %d\n", err);
+  } else {
+    Serial.println("DAC disabled successfully.");
+  }
+}
+
+void setupDAC() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX), // Master transmitter
+    .sample_rate = I2S_SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1, // Interrupt level 1
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false  // Set to true if using APLL (ESP32-S2 specific)
+  };
+
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = DAC_BCK_PIN,   // BCK pin
+    .ws_io_num = DAC_WS_PIN,    // LRCK pin
+    .data_out_num = DAC_DATA_PIN, // DATA pin
+    .data_in_num = I2S_PIN_NO_CHANGE // Not used
+  };
+
+  esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to install I2S driver: %d\n", err);
+    return;
+  }
+  err = i2s_set_pin(I2S_PORT, &pin_config);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to set I2S pins: %d\n", err);
+    return;
+  }
+  Serial.println("DAC setup complete.");
+}
+
+void playRecording(const char* filename) {
+  disableDAC();  // Uninstall I2S driver after playback
+
+  setupDAC();
+
+  if (!LittleFS.exists(filename)) {
+    Serial.println("Recorded file not found!");
+    return;
+  }
+
+  File playbackFile = LittleFS.open(filename, FILE_READ);
+  if (!playbackFile) {
+    Serial.println("Failed to open recorded file!");
+    return;
+  }
+
+  playbackFile.seek(headerSize, SeekSet);
+
+  size_t bytesRead;
+  uint8_t *dataBuffer = (uint8_t *)malloc(I2S_READ_LEN);
+  if (!dataBuffer) {
+    Serial.println("Failed to allocate memory for playback buffer!");
+    playbackFile.close();
+    return;
+  }
+
+  Serial.println(" *** Playback Start *** ");
+  while ((bytesRead = playbackFile.read(dataBuffer, I2S_READ_LEN)) > 0) {
+    size_t bytesWritten;
+    esp_err_t err = i2s_write(I2S_PORT, dataBuffer, bytesRead, &bytesWritten, portMAX_DELAY);
+    if (err != ESP_OK) {
+      Serial.printf("Failed to write to I2S: %d\n", err);
+      break;
+    }
+    if (bytesWritten != bytesRead) {
+      Serial.printf("Bytes written (%d) do not match bytes read (%d)\n", bytesWritten, bytesRead);
+    }
+  }
+
+  free(dataBuffer);
+  playbackFile.close();
+  Serial.println(" *** Playback Finished *** ");
+
+  disableDAC();  // Uninstall I2S driver after playback
+}
+
+void showPostRecordingOptions() {
+  displayMessage("Press * to rerecord  Press1to play messagePress 2 to send", 0, 1);
+}
+
+bool sendTestString() {
+  String testPath = "/ICST/TestString";
+  String testValue = "This is a test";
+
+  Serial.println("Sending test string...");
+  bool success = Database.set<String>(client, testPath.c_str(), testValue);
+  if (success) {
+    Serial.println("Test string uploaded successfully.");
+  } else {
+    Serial.println("Failed to upload test string.");
+    Serial.printf("Error: %s\n", result.error().message().c_str());
+  }
+  return success;
+}
+
+bool sendWavFile(const char* filename) {
+  File file = LittleFS.open(filename, FILE_READ);
+  if (!file) {
+    Serial.println("Failed to open WAV file for reading");
+    return false;
+  }
+
+  Serial.println("WAV file opened successfully.");
+  size_t fileSize = file.size();
+  Serial.printf("WAV file size: %d bytes\n", fileSize);
+
+  // Reset file pointer to the beginning
+  file.seek(0, SeekSet);
+
+  const size_t bufferSize = 1024 * 4;
+  uint8_t buffer[bufferSize];
+  size_t bytesRead;
+  size_t chunkIndex = 0;
+
+  Serial.println("Reading and encoding WAV file...");
+
+  while ((bytesRead = file.read(buffer, bufferSize)) > 0) {
+    Serial.printf("Read %d bytes from WAV file at position %d\n", bytesRead, file.position());
+
+    if (bytesRead > 0) {
+      Serial.printf("1 \n");
+
+      String encodedChunk = base64::encode(buffer, bytesRead);
+      Serial.printf("2 \n");
+
+      String path = String("/ICST/WAVString/chunk") + chunkIndex;
+      Serial.printf("3 \n");
+
+      // Try to set data to Firebase and log the result
+      bool success = Database.set<String>(client, path.c_str(), encodedChunk);
+      Serial.printf("4 \n");
+
+      if (success) {
+        Serial.printf("Chunk %d uploaded successfully\n", chunkIndex);
+        chunkIndex++;
+      } else {
+        Serial.printf("Failed to upload chunk %d\n", chunkIndex);
+        Serial.printf("Error: %s\n", result.error().message().c_str());
+        file.close();
+        return false;
+      }
+    } else {
+      Serial.println("No data read from file.");
+    }
+
+    delay(100);  // Small delay to avoid overwhelming the server
+  }
+
+  if (chunkIndex == 0) {
+    Serial.println("No chunks were processed.");
+  }
+
+  Serial.println("Finished reading and encoding WAV file.");
+  file.close();
+
+  // Fallback test read
+  file = LittleFS.open(filename, FILE_READ);
+  if (!file) {
+    Serial.println("Failed to reopen WAV file for reading");
+    return false;
+  }
+  Serial.println("Reopened WAV file for fallback read test.");
+  bytesRead = file.read(buffer, bufferSize);
+  Serial.printf("Fallback read %d bytes from WAV file\n", bytesRead);
+  file.close();
+
+  return true;
+}
+
+void sendWaveToFirebase(){
+  // Test string upload
+  if (sendTestString()) {
+    Serial.println("Test string sent to Firebase successfully.");
+  } else {
+    Serial.println("Failed to send test string.");
+  }
+
+  // Check if file exists
+  if (LittleFS.exists("/recording.wav")) {
+    Serial.println("WAV file exists. Proceeding to send...");
+    // Read, encode, and send the WAV file to Firebase Realtime Database
+    if (sendWavFile("/recording.wav")) {
+      Serial.println("WAV file sent to Firebase successfully.");
+    } else {
+      Serial.println("Failed to send WAV file.");
+    }
+  } else {
+    Serial.println("WAV file does not exist in LittleFS.");
+  }
+}
+
+void setup() {
+  Wire.begin(18, 23);
+  Serial.begin(115200);
+  customKeypad.begin();
+  listLittleFS();
+  Serial.println(" in setup ");
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  LittleFSInit();
+  listLittleFS();
+  i2sInit();
+  i2sMutex = xSemaphoreCreateMutex();
+
+  connectToWiFi();
+
+  Firebase.printf("Firebase Client v%s\n", FIREBASE_CLIENT_VERSION);
+
+  ssl.setInsecure();
+
+  // Initialize the authentication handler.
+  initializeApp(client, app, getAuth(dbSecret));
+
+  // Binding the authentication handler with your Database class object.
+  app.getApp<RealtimeDatabase>(Database);
+
+  // Set your database URL
+  Database.url(DATABASE_URL);
+  // In sync functions, we have to set the operating result for the client that works with the function.
+  client.setAsyncResult(result);
+}
+
+void loop() {
+  static unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 10000; // Check WiFi connection every 10 seconds
+
+  if (WiFi.status() != WL_CONNECTED && (millis() - lastCheck >= checkInterval)) {
+    Serial.println("Lost WiFi connection. Reconnecting...");
+    lastCheck = millis();
+    WiFi.disconnect();
+    connectToWiFi();
+  }
+
+  customKeypad.tick();
+  while(customKeypad.available()) {
+    keypadEvent e = customKeypad.read();
+    char key = (char)e.bit.KEY;
+
+    if (e.bit.EVENT == KEY_JUST_PRESSED) {
+      Serial.print(key);
+      Serial.println(" pressed");
+	  
+      display.clearDisplay();
+      display.setCursor(0, 10);
+      display.setTextSize(1);
+      display.println("Entered password is:");
+      display.setTextSize(2);
+      display.setCursor(0, 30);
+	  
+    inputSequence += key;
+    if (inputSequence.length() > 4) {
+        inputSequence = inputSequence.substring(inputSequence.length() - 4);
+      }
+	  enteredPassword = inputSequence;
+	  while (enteredPassword.length() != 4 )
+	  {
+		enteredPassword += "_";
+	  }
+      display.println(enteredPassword);
+      display.display();
+
+      
+
+	  Serial.println(" inputSequence is ");
+	  Serial.println(inputSequence);
+      if (inputSequence == "4444") {
+        displayOpenedMessage("DOOR OPENED WELLCOM!!!", 10000);
+        displayMessage("Press * to start", 0, 1);
+        inputSequence = "";
+      }
+
+      if (isRecorded) {
+        if (key == '1') {
+          
+          displayMessage("Playing Message", 0,1);
+          playRecording(filename);
+          showPostRecordingOptions();  // Go back to stage 2
+        } else if (key == '2') {
+          displayMessage("Message is sent", 5000,1);
+          sendWaveToFirebase();
+          delay(100);
+          displayMessage("Press * to start", 0 , 1);
+          isRecorded = false;
+        } else if (key == '*') {
+          display.clearDisplay();
+          display.setTextSize(2);
+          for (int i = 5; i > 0; i--) {
+            display.clearDisplay();
+            display.setCursor(0, 20);
+            display.print("Recording in ");
+            display.print(i);
+            display.display();
+            delay(1000);
+          }
+
+          isRecording = true;
+          recordingComplete = false;
+          xSemaphoreTake(i2sMutex, portMAX_DELAY);
+          startRecording();
+          xSemaphoreGive(i2sMutex);
+          displayMessage("Recording", 0, 2);
+
+          while (!recordingComplete) {
+            delay(10);
+          }
+
+          isRecording = false;
+          recordingComplete = false;
+          isRecorded = true; // Set the flag indicating recording is done
+
+          showPostRecordingOptions();  // Show options after recording
+        }
+      } else {
+        if (key == '*') {
+          displayMessage("Playing Start Message", 0,1);
+          playRecording("/start_message.wav");
+          //delay(3000);
+
+          if (!isRecording) {
+            display.clearDisplay();
+            display.setTextSize(2);
+            for (int i = 5; i > 0; i--) {
+              display.clearDisplay();
+              display.setCursor(0, 20);
+              display.print("Recording in ");
+              display.print(i);
+              display.display();
+              delay(1000);
+            }
+
+            isRecording = true;
+            recordingComplete = false;
+            xSemaphoreTake(i2sMutex, portMAX_DELAY);
+            startRecording();
+            xSemaphoreGive(i2sMutex);
+            displayMessage("Recording", 0, 2);
+
+            while (!recordingComplete) {
+              delay(10);
+            }
+
+            isRecording = false;
+            recordingComplete = false;
+            isRecorded = true; // Set the flag indicating recording is done
+
+            showPostRecordingOptions();  // Show options after recording
+          }
+        }
+      }
+    }
+  }
+  server.handleClient();
+  delay(10);
+}
