@@ -102,7 +102,15 @@ SemaphoreHandle_t i2sMutex;
 TaskHandle_t recordingTaskHandle = NULL;
 
 String inputSequence = ""; // Variable to store key input sequence
-String enteredPassword = ""; // Variable to store key input sequence
+String enteredPassword = "____"; // Variable to store key input sequence
+
+String defult_password = "4444";
+
+unsigned long passwordTimestamp = 0;
+int password_duration = 0 ;
+bool is_current_password_vaild = false;
+bool waiting_for_password = false;
+String current_password = "";
 
 
 void displayMessage(const char* message, int duration, int size) {
@@ -263,7 +271,7 @@ void i2s_adc(void *arg) {
 
       size_t bytes_written = file.write((const byte*) flash_write_buff, i2s_read_len);
       if (bytes_written != i2s_read_len) {
-        Serial.printf("Error writing to file: expected %d, wrote %d\n", i2s_read_len, bytes_written);
+        Serial.printf("///////////////////////////Error writing to file: expected %d, wrote %d\n", i2s_read_len, bytes_written);
       } else {
         Serial.printf("Successfully written %d bytes to file\n", bytes_written);
       }
@@ -295,39 +303,6 @@ void i2s_adc(void *arg) {
 }
 
 
-
-void startRecording() {
-   
-   inputSequence = "";
-  if (recordingTaskHandle != NULL) {
-    Serial.println("Recording task is already running, cannot start another recording.");
-    return;
-  }
-
-  if (LittleFS.exists(filename)) {
-    LittleFS.remove(filename);
-  }
-
-  file = LittleFS.open(filename, FILE_WRITE);
-  if (!file) {
-    Serial.println("File is not available!");
-    return;
-  }
-
-  byte header[headerSize];
-  wavHeader(header, FLASH_RECORD_SIZE);
-  file.write(header, headerSize);
-
-  // Reinitialize I2S for recording
-  i2sInit();
-
-  BaseType_t xReturned = xTaskCreatePinnedToCore(i2s_adc, "i2s_adc", 4096, NULL, 1, &recordingTaskHandle, 1);
-  if (xReturned != pdPASS) {
-    Serial.println("Failed to create recording task");
-    recordingTaskHandle = NULL;
-    file.close();
-  }
-}
 
 void wavHeader(byte* header, int wavSize) {
   header[0] = 'R';
@@ -485,7 +460,7 @@ void setupDAC() {
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_I2S_MSB,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1, // Interrupt level 1
+    .intr_alloc_flags = 0, // Interrupt level 1
     .dma_buf_count = 8,
     .dma_buf_len = 64,
     .use_apll = false  // Set to true if using APLL (ESP32-S2 specific)
@@ -511,51 +486,89 @@ void setupDAC() {
   Serial.println("DAC setup complete.");
 }
 
-void playRecording(const char* filename) {
-  disableDAC();  // Uninstall I2S driver after playback
-
-  setupDAC();
-
-  if (!LittleFS.exists(filename)) {
-    Serial.println("Recorded file not found!");
+void startRecording() {
+   inputSequence = "";
+  if (recordingTaskHandle != NULL) {
+    Serial.println("Recording task is already running, cannot start another recording.");
     return;
   }
 
-  File playbackFile = LittleFS.open(filename, FILE_READ);
-  if (!playbackFile) {
-    Serial.println("Failed to open recorded file!");
+  if (LittleFS.exists(filename)) {
+    LittleFS.remove(filename);
+  }
+
+  file = LittleFS.open(filename, FILE_WRITE);
+  if (!file) {
+    Serial.println("File is not available!");
     return;
   }
 
-  playbackFile.seek(headerSize, SeekSet);
+  byte header[headerSize];
+  wavHeader(header, FLASH_RECORD_SIZE);
+  file.write(header, headerSize);
 
-  size_t bytesRead;
-  uint8_t *dataBuffer = (uint8_t *)malloc(I2S_READ_LEN);
-  if (!dataBuffer) {
-    Serial.println("Failed to allocate memory for playback buffer!");
-    playbackFile.close();
-    return;
+  // Ensure previous I2S instance is stopped and uninstalled
+  i2s_driver_uninstall(I2S_PORT);
+
+  // Reinitialize I2S for recording
+  i2sInit();
+
+  BaseType_t xReturned = xTaskCreatePinnedToCore(i2s_adc, "i2s_adc", 4096, NULL, 1, &recordingTaskHandle, 1);
+  if (xReturned != pdPASS) {
+    Serial.println("Failed to create recording task");
+    recordingTaskHandle = NULL;
+    file.close();
   }
-
-  Serial.println(" *** Playback Start *** ");
-  while ((bytesRead = playbackFile.read(dataBuffer, I2S_READ_LEN)) > 0) {
-    size_t bytesWritten;
-    esp_err_t err = i2s_write(I2S_PORT, dataBuffer, bytesRead, &bytesWritten, portMAX_DELAY);
-    if (err != ESP_OK) {
-      Serial.printf("Failed to write to I2S: %d\n", err);
-      break;
-    }
-    if (bytesWritten != bytesRead) {
-      Serial.printf("Bytes written (%d) do not match bytes read (%d)\n", bytesWritten, bytesRead);
-    }
-  }
-
-  free(dataBuffer);
-  playbackFile.close();
-  Serial.println(" *** Playback Finished *** ");
-
-  disableDAC();  // Uninstall I2S driver after playback
 }
+
+void playRecording(const char* filename) {
+    disableDAC();  // Uninstall I2S driver before playback
+    setupDAC();
+
+    if (!LittleFS.exists(filename)) {
+        Serial.println("Recorded file not found!");
+        return;
+    }
+
+    File playbackFile = LittleFS.open(filename, FILE_READ);
+    if (!playbackFile) {
+        Serial.println("Failed to open recorded file!");
+        return;
+    }
+
+    playbackFile.seek(headerSize, SeekSet);
+
+    size_t bytesRead;
+    uint8_t *dataBuffer = (uint8_t *)malloc(I2S_READ_LEN);
+    if (!dataBuffer) {
+        Serial.println("Failed to allocate memory for playback buffer!");
+        playbackFile.close();
+        return;
+    }
+
+    Serial.println(" *** Playback Start *** ");
+    while ((bytesRead = playbackFile.read(dataBuffer, I2S_READ_LEN)) > 0) {
+        Serial.printf("Read %d bytes from file\n", bytesRead);  // Debug output
+        size_t bytesWritten;
+        esp_err_t err = i2s_write(I2S_PORT, dataBuffer, bytesRead, &bytesWritten, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("Failed to write to I2S: %d\n", err);
+            break;
+        }
+        if (bytesWritten != bytesRead) {
+            Serial.printf("Bytes written (%d) do not match bytes read (%d)\n", bytesWritten, bytesRead);
+        }
+        delay(10);  // Small delay to avoid overwhelming the system
+    }
+
+    free(dataBuffer);  // Free allocated memory
+    playbackFile.close();
+    Serial.println(" *** Playback Finished *** ");
+
+    disableDAC();  // Uninstall I2S driver after playback
+}
+
+
 
 void showPostRecordingOptions() {
   displayMessage("Press * to rerecord  Press1to play messagePress 2 to send", 0, 1);
@@ -582,6 +595,7 @@ bool sendWavFile(const char* filename) {
     Serial.println("Failed to open WAV file for reading");
     return false;
   }
+  displayMessage("sending message ...", 0, 1);
 
   Serial.println("WAV file opened successfully.");
   size_t fileSize = file.size();
@@ -601,24 +615,27 @@ bool sendWavFile(const char* filename) {
     Serial.printf("Read %d bytes from WAV file at position %d\n", bytesRead, file.position());
 
     if (bytesRead > 0) {
-      Serial.printf("1 \n");
-
       String encodedChunk = base64::encode(buffer, bytesRead);
-      Serial.printf("2 \n");
-
       String path = String("/ICST/WAVString/chunk") + chunkIndex;
-      Serial.printf("3 \n");
 
-      // Try to set data to Firebase and log the result
-      bool success = Database.set<String>(client, path.c_str(), encodedChunk);
-      Serial.printf("4 \n");
+      bool success = false;
+      int retryCount = 0;
+
+      // Retry loop for sending the chunk
+      while (!success && retryCount < 10) {
+        success = Database.set<String>(client, path.c_str(), encodedChunk);
+        if (!success) {
+          Serial.printf("Failed to upload chunk %d, attempt %d\n", chunkIndex, retryCount + 1);
+          retryCount++;
+          delay(100);  // Small delay before retrying
+        }
+      }
 
       if (success) {
         Serial.printf("Chunk %d uploaded successfully\n", chunkIndex);
         chunkIndex++;
       } else {
-        Serial.printf("Failed to upload chunk %d\n", chunkIndex);
-        Serial.printf("Error: %s\n", result.error().message().c_str());
+        Serial.printf("Failed to upload chunk %d after 10 attempts\n", chunkIndex);
         file.close();
         return false;
       }
@@ -650,6 +667,7 @@ bool sendWavFile(const char* filename) {
   return true;
 }
 
+
 void sendWaveToFirebase(){
   // Test string upload
   if (sendTestString()) {
@@ -663,12 +681,51 @@ void sendWaveToFirebase(){
     Serial.println("WAV file exists. Proceeding to send...");
     // Read, encode, and send the WAV file to Firebase Realtime Database
     if (sendWavFile("/recording.wav")) {
+      displayMessage("Message is sent", 2 * 1000,1);
       Serial.println("WAV file sent to Firebase successfully.");
     } else {
       Serial.println("Failed to send WAV file.");
     }
   } else {
     Serial.println("WAV file does not exist in LittleFS.");
+  }
+}
+
+
+bool readPasswordFromFireBase() {
+  //String passwordPath = "/messages/password";
+  //String passwordDurationPath = "/messages/duration";
+
+  String passwordPath = "/test/password";
+  String passwordDurationPath = "/test/duration ";
+
+  Serial.println("Reading password string...");
+  current_password = Database.get<String>(client, passwordPath.c_str());
+  String password_duration_str = Database.get<String>(client, passwordDurationPath.c_str());
+  password_duration = password_duration_str.toInt();
+  if (current_password != "" and password_duration_str != "" ) {
+    Serial.println("Password string read successfully.");
+    Serial.println("Password: " + current_password);
+    Serial.println("password_duration: " + password_duration_str);
+  } else {
+    Serial.println("Failed to read password string.");
+    Serial.printf("Error: %s\n", result.error().message().c_str());
+  }
+  return true;
+}
+
+bool isPasswordExpired() {
+  unsigned long currentMillis = millis(); 
+  unsigned long duration = password_duration * 1000;
+  if (currentMillis - passwordTimestamp >= duration) {
+    Serial.printf("currentMillis is %d \n", currentMillis);
+    Serial.printf("passwordTimestamp is %d \n", passwordTimestamp);
+    Serial.printf("duration is %d \n", duration);
+
+    Serial.println("Password has expired.");
+    return true;
+  } else {
+    return false;
   }
 }
 
@@ -710,6 +767,126 @@ void setup() {
   client.setAsyncResult(result);
 }
 
+
+int password_counter = 1 ;
+bool check_password() {
+
+  if (waiting_for_password == false)
+    return false;
+
+  if (inputSequence == current_password) {
+    return true;
+  }
+
+  // Display the current and entered passwords
+  displayMessage(("Please enter the     following Code: " + String(current_password) + 
+                  " Entered Code: " + String(enteredPassword) + 
+                  "   press # to delete").c_str(), 0, 1);
+
+  // Check if the entered password matches the current password
+
+
+  // Check if the input sequence contains any underscores (incomplete entry)
+  for (int i = 0; i < enteredPassword.length(); i++) {
+    if (enteredPassword.charAt(i) == '_') {
+      return false;
+    }
+  }
+
+  if (password_counter > 0) {
+    displayMessage("The password that youhave entered is wrongPlease try again.    You have one more try", 6 * 1000, 1);
+    inputSequence = "";
+    enteredPassword = "____";
+    // Prompt user to re-enter the password
+    displayMessage(("Please enter the   following Code: " + String(current_password) + 
+                    " Entered Code: " + String(enteredPassword) + 
+                    "   press # to delete").c_str(), 0, 1);
+    password_counter--;
+  } else {
+    // If no tries are left
+    inputSequence = "";
+    enteredPassword = "____";
+    waiting_for_password = false;
+    is_current_password_vaild = false;
+    isRecorded = false;
+    displayMessage("The password that youhave entered is wrongUnfortunately, we can't let you in.", 10 * 1000, 1);
+    displayMessage("Press * to start", 0, 1);
+    return false; 
+  }
+
+
+  return false;
+}
+
+
+void openDoor()
+{
+  displayOpenedMessage("DOOR OPENED WELLCOM!!!", 10 * 1000);
+  displayMessage("Press * to start", 0, 1);
+  inputSequence = "";
+  waiting_for_password = false;
+  is_current_password_vaild = false;
+  isRecorded = false;
+
+}
+
+void handlePressedKey(char key)
+{
+    Serial.print(key);
+    Serial.println(" pressed");
+      
+    display.clearDisplay();
+    display.setCursor(0, 10);
+    display.setTextSize(1);
+    display.println("Entered password is:");
+    display.setTextSize(2);
+    display.setCursor(0, 30);
+
+    if (key == '#')
+    {
+        // Remove the last character or replace it with '_'
+        if (inputSequence.length() > 0)
+        {
+        inputSequence = inputSequence.substring(0, inputSequence.length() - 1);
+        }
+    }
+    else 
+    {
+        inputSequence += key;
+    }
+    
+    // Limit the inputSequence to the last 4 characters
+    if (inputSequence.length() > 4) {
+        inputSequence = inputSequence.substring(inputSequence.length() - 4);
+    }
+
+    // Create a 4-character display string with underscores for padding
+    enteredPassword = inputSequence;
+    while (enteredPassword.length() < 4) {
+        enteredPassword += '_';
+    }
+
+    // Display the entered password with padding
+    Serial.println("enteredPassword is ");
+    Serial.println(enteredPassword);
+
+    Serial.println(" inputSequence is ");
+    Serial.println(inputSequence);
+
+
+    check_password();
+
+    // Compare the input sequence with the default password
+    if (inputSequence == defult_password) 
+    {
+        openDoor();
+    }
+
+    return;
+}
+
+
+
 void loop() {
   static unsigned long lastCheck = 0;
   const unsigned long checkInterval = 10000; // Check WiFi connection every 10 seconds
@@ -720,57 +897,54 @@ void loop() {
     WiFi.disconnect();
     connectToWiFi();
   }
+  if (is_current_password_vaild)
+  {
+    if (isPasswordExpired())
+    {
+      displayMessage("The Code Has Expired Please try again" , 10 * 1000, 1);
+      waiting_for_password = false;
+      is_current_password_vaild = false;
+      isRecorded = false;
+      displayMessage("Press * to start", 0, 1);
 
+    }else
+    {
+      check_password();
+    }
+    
+
+  }
   customKeypad.tick();
   while(customKeypad.available()) {
     keypadEvent e = customKeypad.read();
     char key = (char)e.bit.KEY;
 
     if (e.bit.EVENT == KEY_JUST_PRESSED) {
-      Serial.print(key);
-      Serial.println(" pressed");
-	  
-      display.clearDisplay();
-      display.setCursor(0, 10);
-      display.setTextSize(1);
-      display.println("Entered password is:");
-      display.setTextSize(2);
-      display.setCursor(0, 30);
-	  
-    inputSequence += key;
-    if (inputSequence.length() > 4) {
-        inputSequence = inputSequence.substring(inputSequence.length() - 4);
-      }
-	  enteredPassword = inputSequence;
-	  while (enteredPassword.length() != 4 )
-	  {
-		enteredPassword += "_";
-	  }
-      display.println(enteredPassword);
-      display.display();
 
-      
 
-	  Serial.println(" inputSequence is ");
-	  Serial.println(inputSequence);
-      if (inputSequence == "4444") {
-        displayOpenedMessage("DOOR OPENED WELLCOM!!!", 10000);
-        displayMessage("Press * to start", 0, 1);
-        inputSequence = "";
-      }
-
+      handlePressedKey(key);
       if (isRecorded) {
-        if (key == '1') {
+        if (waiting_for_password)
+        {
+          if (check_password())
+          {
+            openDoor();
+          }
+        }
+        else if (key == '1') {
           
           displayMessage("Playing Message", 0,1);
           playRecording(filename);
           showPostRecordingOptions();  // Go back to stage 2
         } else if (key == '2') {
-          displayMessage("Message is sent", 5000,1);
+          displayMessage("sending message ...",0, 1);
           sendWaveToFirebase();
-          delay(100);
-          displayMessage("Press * to start", 0 , 1);
-          isRecorded = false;
+          readPasswordFromFireBase();
+          enteredPassword = "____";
+          is_current_password_vaild = true;
+          waiting_for_password = true;
+          passwordTimestamp = millis();
+          inputSequence = "";
         } else if (key == '*') {
           display.clearDisplay();
           display.setTextSize(2);
@@ -801,10 +975,10 @@ void loop() {
           showPostRecordingOptions();  // Show options after recording
         }
       } else {
+        displayMessage("Press * to start", 0 , 1);
         if (key == '*') {
           displayMessage("Playing Start Message", 0,1);
           playRecording("/start_message.wav");
-          //delay(3000);
 
           if (!isRecording) {
             display.clearDisplay();
@@ -840,5 +1014,5 @@ void loop() {
     }
   }
   server.handleClient();
-  delay(10);
+  delay(5);
 }
