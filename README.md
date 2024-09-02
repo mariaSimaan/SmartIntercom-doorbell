@@ -9,3 +9,4 @@ Hardware Components:
 - keypad
 
 Project Diagram:
+![Project Diagram](images/Project Diagram.png)
