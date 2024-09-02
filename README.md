@@ -1,6 +1,6 @@
 # __Smart Intercom / Doorbell__
 ## Project by: Renee Bishara, Jana Simaan & Maria Simaan.
-In this project we built A smart doorbell that allows visitors to communicate with the homeowner via audio and gain entry using a one-time code. 
+In this project we built a smart doorbell that allows visitors to communicate with the homeowner via audio and gain entry using a one-time code. 
 the main features of this project are : 
 Real-Time Audio Communication: Visitors can send audio message to the admin directly through the doorbell.
 One-Time Code Access: Admin can generate a one-time entry code for visitors.
