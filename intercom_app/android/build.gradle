@@ -1,0 +1,38 @@
+buildscript {
+    ext.kotlin_version = '1.8.22'  // Ensure this is consistent across all modules
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+       // classpath 'com.android.tools.build:gradle:4.1.0'  // or your current version
+       //classpath 'com.android.tools.build:gradle:7.0.2'
+       //added1
+       classpath 'com.android.tools.build:gradle:7.3.1'
+        // Other classpath dependencies
+        classpath 'com.google.gms:google-services:4.3.8'
+
+    }
+}
+
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}

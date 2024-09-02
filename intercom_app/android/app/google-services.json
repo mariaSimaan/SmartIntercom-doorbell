@@ -1,0 +1,49 @@
+{
+  "project_info": {
+    "project_number": "964303376551",
+    "firebase_url": "https://smartintercom-b517f-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "smartintercom-b517f",
+    "storage_bucket": "smartintercom-b517f.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:964303376551:android:4d48c6078a8ba158314b82",
+        "android_client_info": {
+          "package_name": "com.example.app_2"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyASO4iwGRr6o4BvFRgIIzfAISH7Is-TAPA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:964303376551:android:d6b7b28ad344d950314b82",
+        "android_client_info": {
+          "package_name": "com.example.app_maria"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyASO4iwGRr6o4BvFRgIIzfAISH7Is-TAPA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
