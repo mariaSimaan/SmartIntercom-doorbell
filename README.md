@@ -4,7 +4,7 @@ In this project we built A smart doorbell that allows visitors to communicate wi
 
 # Folder description :
 - UniTests: tests for individual hardware components and with integration.
--ESP: source code for the esp side.
+- ESP: source code for the esp side.
 - app :the source code for the application
 
 # Hardware
