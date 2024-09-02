@@ -8,5 +8,5 @@ Hardware Components:
 - mic
 - keypad
 
-Project Diagram:
+
 ![Project Diagram](images/Project Diagram.png)
